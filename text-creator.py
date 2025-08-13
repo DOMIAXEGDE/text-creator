@@ -1,6 +1,7 @@
 # text.py
-# A runtime programmable Python 3.13.5 console application for Windows 11 Pro.
-# This script functions as a workbench text editor with integrated PowerShell command execution.
+# A runtime programmable Python 3.13.5 console application for Windows 11 Pro and Linux.
+# This script functions as a workbench text editor with integrated shell command execution
+# and simple C++ code compilation.
 #
 # VERSION 2 - STABILITY FIX
 # - Reworked screen drawing logic to prevent 'addwstr() returned ERR' crashes.
@@ -25,7 +26,8 @@
 # - :o [filename]   - Open a file.
 # - :q              - Quit the editor. (Will warn if there are unsaved changes).
 # - :q!             - Force quit without saving.
-# - :! <command>    - Execute a PowerShell command. The output will be inserted into the text.
+# - :! <command>    - Execute a shell command. The output will be inserted into the text.
+# - :cpp            - Compile and run the current buffer as C++23, inserting program output.
 # - :help           - Display the help screen.
 
 import curses
@@ -38,7 +40,7 @@ class TextEditor:
     """
     Encapsulates the state and behavior of the console text editor.
     It manages the text buffer, user input, screen drawing, file I/O,
-    and PowerShell command execution.
+    shell command execution, and a lightweight C++ compilation helper.
     """
     def __init__(self, stdscr, initial_file=None):
         """Initializes the editor state."""
@@ -151,6 +153,25 @@ class TextEditor:
         if remaining_space > 0:
             self.safe_addstr(height - 1, len(full_bar), ' ' * remaining_space, curses.A_REVERSE)
 
+    def insert_text(self, text):
+        """Inserts a block of text at the current cursor position."""
+        if not text:
+            return
+
+        output_lines = text.splitlines()
+        current_line = self.buffer[self.cursor_y]
+        before_cursor = current_line[:self.cursor_x]
+        after_cursor = current_line[self.cursor_x:]
+
+        self.buffer[self.cursor_y] = before_cursor + output_lines[0]
+        for i, line in enumerate(output_lines[1:]):
+            self.buffer.insert(self.cursor_y + 1 + i, line)
+
+        self.cursor_y += len(output_lines) - 1
+        self.cursor_x = len(self.buffer[self.cursor_y])
+        self.buffer[self.cursor_y] += after_cursor
+        self.dirty = True
+
     def show_help_screen(self):
         """Displays a full-screen help menu until a key is pressed."""
         self.stdscr.erase()
@@ -159,11 +180,11 @@ class TextEditor:
         help_text = [
             "--- text.py Help ---",
             "",
-            "text.py is a simple console-based text editor with integrated PowerShell scripting.",
+            "text.py is a simple console-based text editor with integrated shell scripting.",
             "",
             "MODES",
             "  EDIT MODE:    Default mode. Type to insert text.",
-            "  COMMAND MODE: Enter commands for file operations or to run PowerShell scripts.",
+            "  COMMAND MODE: Enter commands for file operations or to run shell scripts.",
             "  Press 'ESC' to switch from EDIT to COMMAND mode.",
             "",
             "EDIT MODE CONTROLS",
@@ -179,9 +200,10 @@ class TextEditor:
             "  :q              Quit the editor. Fails if there are unsaved changes.",
             "  :q!             Force quit without saving any changes.",
             "  :help           Display this help screen.",
-            "  :! <command>    Execute a PowerShell command and insert its output at the cursor.",
-            "                  Example: ':! Get-Date'",
-            "                  Example: ':! Get-ChildItem | Format-Table'",
+            "  :! <command>    Execute a shell command and insert its output at the cursor.",
+            "                  Example: ':! ls -al'",
+            "  :cpp            Compile and run the current buffer as C++23.",
+            "                  Program output or compiler errors are inserted at the cursor.",
             "",
             "",
             "Press any key to return to the editor..."
@@ -307,56 +329,94 @@ class TextEditor:
                     self.open_file(args[0])
             else:
                 self.status_message = "Usage: :o <filename>"
+        elif cmd == 'cpp':
+            self.compile_and_run_cpp()
         elif cmd.startswith('!'):
-            ps_command = command[1:].strip()
-            self.execute_powershell(ps_command)
+            shell_command = command[1:].strip()
+            self.execute_shell(shell_command)
         else:
             self.status_message = f"Unknown command: {cmd}"
         
         return False # Do not quit
 
-    def execute_powershell(self, ps_command):
-        """Executes a PowerShell command and inserts its output into the buffer."""
-        if not ps_command:
-            self.status_message = "No PowerShell command provided."
+    def execute_shell(self, shell_command):
+        """Executes a shell command and inserts its output into the buffer."""
+        if not shell_command:
+            self.status_message = "No shell command provided."
             return
 
-        self.status_message = f"Executing: {ps_command[:40]}..."
+        self.status_message = f"Executing: {shell_command[:40]}..."
         self.draw()
+
+        if os.name == 'nt':
+            cmd = ['powershell', '-Command', shell_command]
+        else:
+            cmd = ['bash', '-lc', shell_command]
 
         try:
             result = subprocess.run(
-                ['powershell', '-Command', ps_command],
+                cmd,
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
                 errors='replace',
                 check=False
             )
-            
+
             output_to_insert = result.stderr if result.returncode != 0 and result.stderr else result.stdout
-            self.status_message = f"PowerShell command finished."
+            self.status_message = "Command finished."
 
             if not output_to_insert.strip():
                 self.status_message = "Command produced no output."
                 return
 
-            output_lines = output_to_insert.strip().splitlines()
-            current_line = self.buffer[self.cursor_y]
-            before_cursor = current_line[:self.cursor_x]
-            after_cursor = current_line[self.cursor_x:]
-
-            self.buffer[self.cursor_y] = before_cursor + output_lines[0]
-            for i, line in enumerate(output_lines[1:]):
-                self.buffer.insert(self.cursor_y + 1 + i, line)
-
-            self.cursor_y += len(output_lines) - 1
-            self.cursor_x = len(self.buffer[self.cursor_y])
-            self.buffer[self.cursor_y] += after_cursor
-            self.dirty = True
+            self.insert_text(output_to_insert.strip())
 
         except FileNotFoundError:
-            self.status_message = "Error: 'powershell' not found. Is it in your system's PATH?"
+            self.status_message = "Error: shell not found."
+        except Exception as e:
+            self.status_message = f"Python Error: {str(e)}"
+
+    def compile_and_run_cpp(self):
+        """Compiles the current buffer as C++23 and inserts program output or errors."""
+        source_code = "\n".join(self.buffer)
+        self.status_message = "Compiling C++ code..."
+        self.draw()
+
+        try:
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                src_path = os.path.join(tmpdir, "main.cpp")
+                exe_path = os.path.join(tmpdir, "a.out")
+                if os.name == 'nt':
+                    exe_path += '.exe'
+                with open(src_path, 'w', encoding='utf-8') as f:
+                    f.write(source_code)
+
+                compile_cmd = ['g++', '-std=c++23', src_path, '-o', exe_path]
+                compile_res = subprocess.run(
+                    compile_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace'
+                )
+
+                if compile_res.returncode != 0:
+                    output = compile_res.stderr or "Compilation failed."
+                    self.status_message = "Compilation failed."
+                    self.insert_text(output.strip())
+                    return
+
+                run_res = subprocess.run(
+                    [exe_path], capture_output=True, text=True, encoding='utf-8', errors='replace'
+                )
+                output = run_res.stdout
+                if run_res.stderr:
+                    output += ("\n" + run_res.stderr)
+                if not output.strip():
+                    output = "(program produced no output)"
+                self.status_message = f"Program exited with code {run_res.returncode}"
+                self.insert_text(output.strip())
+
+        except FileNotFoundError:
+            self.status_message = "g++ compiler not found."
         except Exception as e:
             self.status_message = f"Python Error: {str(e)}"
 
